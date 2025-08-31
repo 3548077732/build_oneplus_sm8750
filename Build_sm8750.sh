@@ -22,12 +22,12 @@ ENABLE_LZ4KD=true
 info "请选择要编译的机型："
 info "1. 一加 Ace 5 Pro"
 info "2. 一加 13"
-info "3.一加 13T"
-info "4.一加 Pad 2 Pro"
-info "5.一加 Ace5 至尊版"
-info "6.真我 GT 7"
-info "7.真我 GT 7 Pro"
-info "8.真我 GT 7 Pro 竞速"
+info "3. 一加 13T"
+info "4. 一加 Pad 2 Pro"
+info "5. 一加 Ace5 至尊版"
+info "6. 真我 GT 7"
+info "7. 真我 GT 7 Pro"
+info "8. 真我 GT 7 Pro 竞速"
 
 read -p "输入选择 [1-8]: " device_choice
 
@@ -81,7 +81,7 @@ case $device_choice in
         KERNEL_SUFFIX="-android15-8-g013ec21bba94-abogki383916444-4k"
         ;;
     *)
-        error "无效的选择，请输入1-7之间的数字"
+        error "无效的选择，请输入1-8之间的数字"
         ;;
 esac
 
@@ -118,7 +118,7 @@ info "内核源码文件: $REPO_MANIFEST"
 info "内核名称: $KERNEL_SUFFIX"
 info "内核时间: $KERNEL_TIME"
 info "是否开启KPM: $ENABLE_KPM"
-info "是否开启LZ4KD: $ENABLE_LZ4KD"
+info "是否开启LZ4: $ENABLE_LZ4KD"
 info "是否开启BBR: $ENABLE_BBR"
 
 # 环境变量 - 按机型区分ccache目录
@@ -146,7 +146,7 @@ else
 fi
 
 # 工作目录 - 按机型区分
-WORKSPACE="$HOME/kernel_${DEVICE_NAME}"
+WORKSPACE="$PWD/build_workspace"
 mkdir -p "$WORKSPACE" || error "无法创建工作目录"
 cd "$WORKSPACE" || error "无法进入工作目录"
 
@@ -172,8 +172,8 @@ fi
 # 配置 Git（仅在未配置时）
 info "检查 Git 配置..."
 
-GIT_NAME=$(git config --global user.name || echo "")
-GIT_EMAIL=$(git config --global user.email || echo "")
+git config --global user.name "Local Builder"
+git config --global user.email "builder@localhost"
 
 if [ -z "$GIT_NAME" ] || [ -z "$GIT_EMAIL" ]; then
     info "Git 未配置，正在设置..."
@@ -205,7 +205,7 @@ cd "$KERNEL_WORKSPACE" || error "无法进入kernel_workspace目录"
 # 初始化源码
 info "初始化repo并同步源码..."
 repo init -u https://github.com/showdo/kernel_manifest.git -b refs/heads/oneplus/sm8750 -m "$REPO_MANIFEST" --depth=1 || error "repo初始化失败"
-repo --trace sync -c -j$(nproc --all) --no-tags || error "repo同步失败"
+repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle --force-sync || error "repo同步失败"
 
 # ==================== 核心构建步骤 ====================
 
@@ -217,11 +217,49 @@ rm -f kernel_platform/msm-kernel/android/abi_gki_protected_exports_*
 # 设置SukiSU
 info "设置SukiSU..."
 cd kernel_platform || error "进入kernel_platform失败"
-curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/susfs-main/kernel/setup.sh" -o setup.sh && bash setup.sh susfs-main || error "SukiSU设置失败"
+curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/susfs-main/kernel/setup.sh" | bash -s susfs-main
 
-cd KernelSU || error "进入KernelSU目录失败"
-export KSU_VERSION=$(expr $(git rev-list --count main 2>/dev/null || echo 13000) + 10700)
-info "SukiSU版本号：$KSU_VERSION"
+cd KernelSU
+KSU_VERSION_COUNT=$(git rev-list --count main)
+export KSUVER=$(expr $KSU_VERSION_COUNT + 10700)
+
+for i in {1..3}; do
+  KSU_API_VERSION=$(curl -fsSL "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/susfs-main/kernel/Makefile" | \
+    grep -m1 "KSU_VERSION_API :=" | cut -d'=' -f2 | tr -d '[:space:]')
+  [ -n "$KSU_API_VERSION" ] && break || sleep 2
+done
+
+if [ -z "$KSU_API_VERSION" ]; then
+  echo "Error:KSU_API_VERSION Not Found" >&2
+  exit 1
+fi
+
+KSU_COMMIT_HASH=$(git ls-remote https://github.com/SukiSU-Ultra/SukiSU-Ultra.git refs/heads/susfs-main | cut -f1 | cut -c1-8)
+KSU_VERSION_FULL="v${KSU_API_VERSION}-${KSU_COMMIT_HASH}-xiaoxiaow"
+
+# 删除旧定义
+sed -i '/define get_ksu_version_full/,/endef/d' kernel/Makefile
+sed -i '/KSU_VERSION_API :=/d' kernel/Makefile
+sed -i '/KSU_VERSION_FULL :=/d' kernel/Makefile
+
+# 插入新定义在 REPO_OWNER := 之后
+TMP_FILE=$(mktemp)
+while IFS= read -r line; do
+  echo "$line" >> "$TMP_FILE"
+  if echo "$line" | grep -q 'REPO_OWNER :='; then
+    cat >> "$TMP_FILE" <<EOF
+define get_ksu_version_full
+v\\\$\$1-${KSU_COMMIT_HASH}-xiaoxiaow
+endef
+
+KSU_VERSION_API := ${KSU_API_VERSION}
+KSU_VERSION_FULL := ${KSU_VERSION_FULL}
+EOF
+  fi
+done < kernel/Makefile
+mv "$TMP_FILE" kernel/Makefile
+
+echo "✅ SukiSU Ultra configured."
 
 # 设置susfs
 info "设置susfs..."
@@ -317,11 +355,11 @@ CONFIG_KSU_SUSFS_ENABLE_LOG=y
 CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
 CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
 CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-CONFIG_CRYPTO_LZ4HC=y
-CONFIG_CRYPTO_LZ4=y
-CONFIG_CRYPTO_LZ4K=y
-CONFIG_CRYPTO_LZ4KD=y
-CONFIG_CRYPTO_842=y
+#CONFIG_CRYPTO_LZ4HC=y
+#CONFIG_CRYPTO_LZ4=y
+#CONFIG_CRYPTO_LZ4K=y
+#CONFIG_CRYPTO_LZ4KD=y
+#CONFIG_CRYPTO_842=y
 CONFIG_DEBUG_INFO_BTF=y
 CONFIG_PAHOLE_HAS_SPLIT_BTF=y
 CONFIG_PAHOLE_HAS_BTF_TAG=y
@@ -384,37 +422,25 @@ make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clan
   PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole \
   LD=ld.lld HOSTLD=ld.lld O=out KCFLAGS+=-O2 gki_defconfig all || error "失败"
 
-
 # 应用KPM补丁
-info "应用KPM补丁..."
-cd out/arch/arm64/boot || error "进入boot目录失败"
-curl -LO https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/download/0.12.0/patch_linux || error "下载patch_linux失败"
-chmod +x patch_linux
-./patch_linux || error "应用patch_linux失败"
-rm -f Image
-mv oImage Image || error "替换Image失败"
+# info "应用KPM补丁..."
+# cd out/arch/arm64/boot || error "进入boot目录失败"
+# curl -LO https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/download/0.12.0/patch_linux || error "下载patch_linux失败"
+# chmod +x patch_linux
+# ./patch_linux || error "应用patch_linux失败"
+# rm -f Image
+# mv oImage Image || error "替换Image失败"
 
-# 创建AnyKernel3包
-# info "创建AnyKernel3包..."
-# cd "$WORKSPACE" || error "返回工作目录失败"
-# git clone -q https://github.com/showdo/AnyKernel3.git --depth=1 || info "AnyKernel3已存在"
-# rm -rf ./AnyKernel3/.git
-# rm -f ./AnyKernel3/push.sh
-# cp "$KERNEL_WORKSPACE/kernel_platform/common/out/arch/arm64/boot/Image" ./AnyKernel3/ || error "复制Image失败"
+# Package Kernel with AnyKernel3
+echo "📦 Packaging kernel with AnyKernel3..."
+git clone https://github.com/Xiaomichael/AnyKernel3 --depth=1
+rm -rf ./AnyKernel3/.git
 
-# 打包
-# cd AnyKernel3 || error "进入AnyKernel3目录失败"
-# zip -r "AnyKernel3_${KSU_VERSION}_${DEVICE_NAME}_SuKiSu.zip" ./* || error "打包失败"
+IMAGE_PATH=$(find "$WORKSPACE/kernel_workspace/kernel_platform/common/out/" -name "Image" | head -n 1)
+if [ -z "$IMAGE_PATH" ]; then echo "❌ FATAL: Kernel Image not found after build!" && exit 1; fi
 
-# 创建C盘输出目录（通过WSL访问Windows的C盘）
-WIN_OUTPUT_DIR="/mnt/c/Kernel_Build/${DEVICE_NAME}/"
-mkdir -p "$WIN_OUTPUT_DIR" || error "无法创建Windows目录，可能未挂载C盘，将保存到Linux目录:$WORKSPACE/AnyKernel3/AnyKernel3_${KSU_VERSION}_${DEVICE_NAME}_SuKiSu.zip"
+echo "✅ Kernel Image found at: $IMAGE_PATH"
+cp "$IMAGE_PATH" ./AnyKernel3/Image
 
-# 复制Image和AnyKernel3包
-cp "$KERNEL_WORKSPACE/kernel_platform/common/out/arch/arm64/boot/Image" "$WIN_OUTPUT_DIR/"
-# cp "$WORKSPACE/AnyKernel3/AnyKernel3_${KSU_VERSION}_${DEVICE_NAME}_SuKiSu.zip" "$WIN_OUTPUT_DIR/"
-
-rm -rf $WORKSPACE
-# info "内核包路径: C:/Kernel_Build/${DEVICE_NAME}/AnyKernel3_${KSU_VERSION}_${DEVICE_NAME}_SukiSU.zip"
-info "Image路径: C:/Kernel_Build/${DEVICE_NAME}/Image"
-info "请在C盘目录中查找Image文件。"
+echo "📦 Creating final zip file: ${DEVICE_NAME}_SukiSU_Ultra_lz4_zstd_${KSUVER}..."
+cd AnyKernel3 && zip -q -r9 "../${DEVICE_NAME}_SukiSU_Ultra_lz4_zstd_${KSUVER}" ./* && cd ..
